@@ -1,66 +1,85 @@
-// content_script.js
 (() => {
   console.log('Shift Hello content script loaded');
 
   const DIALOG_ID = 'shift-hello-dialog-unique-01';
+  const CONTENT_ID = 'shift-hello-content';
   let mouseX = 0, mouseY = 0;
   let isVisible = false;
+  let lastTranslation = null;
 
   // Track mouse position
   document.addEventListener('mousemove', (e) => {
     mouseX = e.clientX;
     mouseY = e.clientY;
-  }, {capture: true, passive: true});
+  }, { capture: true, passive: true });
 
-  // Show dialog when Shift is pressed
+  // Toggle popup with Shift
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Shift' && !isVisible) {
-      showDialog(mouseX, mouseY);
+    if (e.key === 'Shift') {
+      if (isTypingArea(document.activeElement)) return;
+      if (isVisible) hideDialog();
+      else showDialog(mouseX, mouseY);
     }
-    if (e.key === 'Escape' && isVisible) {
-      hideDialog();
-    }
+    if (e.key === 'Escape' && isVisible) hideDialog();
   }, true);
 
-  // Hide dialog if clicking outside of it
+  // Hide when clicking outside (unless on image in OCR mode)
   document.addEventListener('mousedown', (e) => {
     if (!isVisible) return;
     const dialog = document.getElementById(DIALOG_ID);
-    if (dialog && !dialog.contains(e.target)) {
-      hideDialog();
+
+    // 🔹 If clicked an <img> → send for OCR
+    if (e.target.tagName && e.target.tagName.toLowerCase() === 'img') {
+      const imgSrc = e.target.src;
+      if (imgSrc) {
+        updateDialog("⏳ Processing image...");
+        chrome.runtime.sendMessage({
+          action: "ocrImage",
+          src: imgSrc
+        }, (response) => {
+          if (response && response.text) {
+            updateDialog(response.text);
+          } else {
+            updateDialog("❌ Failed to get translation");
+          }
+        });
+      }
+      return; // don’t close popup
     }
+
+    // Normal outside-click → close popup
+    if (dialog && !dialog.contains(e.target)) hideDialog();
   }, true);
 
   function showDialog(x, y) {
-    hideDialog(); // remove any existing one
-
+    hideDialog();
     const d = document.createElement('div');
     d.id = DIALOG_ID;
-    d.textContent = 'Hello, world!'; // change text here
+    const initialText = lastTranslation || 'No word selected yet';
+    d.innerHTML = `
+      <h3 style="margin:0 0 8px 0; font-size:16px; text-align:center;">Translation</h3>
+      <div id="${CONTENT_ID}" style="white-space:pre-wrap;overflow:auto;height:calc(100% - 34px);">
+        ${escapeHtml(initialText)}
+      </div>
+    `;
     Object.assign(d.style, {
       position: 'fixed',
       left: `${x + 12}px`,
       top: `${y + 12}px`,
+      width: '300px',
+      height: '300px',
       zIndex: 2147483647,
-      pointerEvents: 'auto',
-      padding: '8px 12px',
       background: 'white',
-      color: '#111',
-      border: '1px solid rgba(0,0,0,0.15)',
+      border: '1px solid rgba(0,0,0,0.2)',
       borderRadius: '8px',
-      boxShadow: '0 6px 18px rgba(0,0,0,0.12)',
+      boxShadow: '0 8px 24px rgba(0,0,0,0.2)',
+      padding: '12px',
+      boxSizing: 'border-box',
+      fontFamily: 'system-ui, sans-serif',
       fontSize: '14px',
-      fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, Arial',
-      userSelect: 'none'
+      color: '#111',
+      overflow: 'hidden'
     });
-
-    // Optional close button inside
-    const closeBtn = document.createElement('button');
-    closeBtn.textContent = '×';
-    closeBtn.style.marginLeft = '10px';
-    closeBtn.onclick = () => hideDialog();
-    d.appendChild(closeBtn);
-
     document.documentElement.appendChild(d);
     isVisible = true;
   }
@@ -69,5 +88,35 @@
     const existing = document.getElementById(DIALOG_ID);
     if (existing) existing.remove();
     isVisible = false;
+  }
+
+  function isTypingArea(el) {
+    if (!el) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea') return true;
+    if (el.isContentEditable) return true;
+    return false;
+  }
+
+  function updateDialog(text) {
+    lastTranslation = text == null ? null : String(text);
+    const container = document.getElementById(CONTENT_ID);
+    if (container) container.textContent = lastTranslation || 'No word selected yet';
+  }
+
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (!message || typeof message !== 'object') return;
+      if (message.action === 'setTranslation') {
+        updateDialog(message.text);
+        sendResponse && sendResponse({ ok: true });
+      }
+      return true;
+    });
+  }
+
+  function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 })();
