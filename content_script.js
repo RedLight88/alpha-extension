@@ -29,23 +29,36 @@
     const dialog = document.getElementById(DIALOG_ID);
 
     // 🔹 If clicked an <img> → send for OCR
-    if (e.target.tagName && e.target.tagName.toLowerCase() === 'img') {
-      const imgSrc = e.target.src;
-      if (imgSrc) {
-        updateDialog("⏳ Processing image...");
-        chrome.runtime.sendMessage({
-          action: "ocrImage",
-          src: imgSrc
-        }, (response) => {
-          if (response && response.text) {
-            updateDialog(response.text);
-          } else {
-            updateDialog("❌ Failed to get translation");
-          }
-        });
+  if (e.target.tagName && e.target.tagName.toLowerCase() === 'img') {
+  const img = e.target;
+  updateDialog("⏳ Converting image...");
+
+  // Convert image to base64 using an offscreen canvas
+  const canvas = document.createElement('canvas');
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const base64 = canvas.toDataURL('image/png'); // format: "data:image/png;base64,..."
+
+  updateDialog("⏳ Sending for OCR...");
+  chrome.runtime.sendMessage(
+    {
+      action: "ocrImage",
+      src: base64  // send base64 string to background.js
+    },
+    (response) => {
+      if (response && response.text) {
+        updateDialog(response.text);
+      } else {
+        updateDialog("❌ Failed to get OCR text");
       }
-      return; // don’t close popup
     }
+  );
+
+  return; // don’t close popup
+}
+
 
     // Normal outside-click → close popup
     if (dialog && !dialog.contains(e.target)) hideDialog();
