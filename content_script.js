@@ -29,7 +29,8 @@
       chrome.runtime.sendMessage({
         action: "captureAndAnalyze",
         x: mouseX,
-        y: mouseY
+        y: mouseY,
+        pixelRatio: window.devicePixelRatio // <-- THIS IS THE FIX
       }, (response) => {
         // Check if dialog is still visible (user might have hidden it)
         if (!isVisible) return; 
