@@ -1,26 +1,34 @@
 import sys
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import easyocr
 import base64
 import io
 import numpy
 from PIL import Image
-import requests  
+import requests
+import pytesseract
+from pytesseract import Output
 
-# --- Model Setup ---
+# --- Tesseract Configuration ---
+# 1. This tells pytesseract where to find the .exe you just installed.
+# 2. Check this path! If you installed Tesseract somewhere else, update this string.
+# 3. The 'r' at the beginning (r'...') is important. It means "raw string".
+try:
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    # Test if it's working
+    version = pytesseract.get_tesseract_version()
+    print(f"Tesseract {version} found and configured.")
+except Exception as e:
+    print("--- TESSERACT NOT FOUND ERROR ---")
+    print(f"Error: {e}")
+    print(f"Please check that 'tesseract_cmd' is set to the correct path.")
+    print(r"Default is: C:\Program Files\Tesseract-OCR\tesseract.exe")
+    sys.exit(1)
+# --- End of Configuration ---
+
 app = Flask(__name__)
 CORS(app)
 
-print("Loading EasyOCR model...")
-try:
-    reader = easyocr.Reader(['ja', 'en'])
-    print("EasyOCR model loaded successfully.")
-except Exception as e:
-    print(f"CRITICAL: Failed to load EasyOCR model. Error: {e}")
-    sys.exit(1)
-
-# (Jisho initialization is no longer needed)
 print("Backend ready.")
 # --- End of Setup ---
 
@@ -40,8 +48,8 @@ def decode_image_from_base64(data_url):
 
 def find_word_at_cursor(ocr_results, x_logical, y_logical, pixelRatio):
     """
-    Iterates through OCR results to find the text at the cursor
-    by scaling the logical coordinates to physical screenshot coordinates.
+    Iterates through Tesseract's OCR results to find the text at the cursor.
+    Tesseract's data is different from easyocr's.
     """
     x_physical = x_logical * pixelRatio
     y_physical = y_logical * pixelRatio
@@ -49,11 +57,25 @@ def find_word_at_cursor(ocr_results, x_logical, y_logical, pixelRatio):
     print(f"Logical coords: ({x_logical}, {y_logical}). PixelRatio: {pixelRatio}. Physical coords: ({x_physical}, {y_physical})")
     
     target_text = None
-    for (bbox, text, prob) in ocr_results:
-        (x_min, y_min) = bbox[0]
-        (x_max, y_max) = bbox[2]
+    # Tesseract's 'results' is a dictionary. We loop through each detected word.
+    num_items = len(ocr_results['text'])
+    
+    for i in range(num_items):
+        # Get the bounding box of the word
+        x_box = ocr_results['left'][i]
+        y_box = ocr_results['top'][i]
+        w = ocr_results['width'][i]
+        h = ocr_results['height'][i]
         
-        if (x_min <= x_physical <= x_max) and (y_min <= y_physical <= y_max):
+        # Get the text (and clean it)
+        text = ocr_results['text'][i].strip()
+        
+        # Skip empty text (like whitespace)
+        if not text:
+            continue
+            
+        # Check if the PHYSICAL cursor (x_physical, y_physical) is inside this box
+        if (x_box <= x_physical <= (x_box + w)) and (y_box <= y_physical <= (y_box + h)):
             target_text = text
             print(f"Found text: '{target_text}' at cursor.")
             break # Found our word
@@ -63,7 +85,7 @@ def find_word_at_cursor(ocr_results, x_logical, y_logical, pixelRatio):
 @app.route('/ocr-and-translate', methods=['POST'])
 def handle_ocr():
     """
-    Receives screenshot and cursor, runs OCR, finds the word,
+    Receives screenshot and cursor, runs Tesseract OCR, finds the word,
     and returns the word, furigana, and translation from Jisho.
     """
     print("Received a new analysis request...")
@@ -86,30 +108,26 @@ def handle_ocr():
     if pil_image is None:
         return jsonify({"error": "Failed to decode image"}), 400
 
-    # 3. Run OCR
+    # 3. --- Run Tesseract OCR ---
     try:
-        image_np = numpy.array(pil_image)
-        print("Running OCR on the image...")
-        results = reader.readtext(image_np)
-        print(f"OCR found {len(results)} text block(s).")
+        print("Running Tesseract OCR on the image...")
+        # Use 'jpn+eng' to detect both Japanese and English
+        # output_type=Output.DICT makes it return a useful dictionary
+        results = pytesseract.image_to_data(pil_image, lang='jpn+eng', output_type=Output.DICT)
+        print(f"Tesseract found {len(results['text'])} text block(s).")
     except Exception as e:
-        return jsonify({"error": f"OCR failed: {e}"}), 500
+        return jsonify({"error": f"Tesseract OCR failed: {e}"}), 500
 
     # 4. Find the word at the cursor
     target_text = find_word_at_cursor(results, x, y, pixelRatio)
     
-    # 5. --- NEW: Get Furigana and Translation using requests ---
+    # 5. Get Furigana and Translation from Jisho (This part is unchanged)
     if target_text:
         try:
             print(f"Looking up '{target_text}' on Jisho...")
-            
-            # Define the Jisho API endpoint
             jisho_url = f"https://jisho.org/api/v1/search/words?keyword={target_text}"
-            
-            # Make the web request
             response = requests.get(jisho_url)
             
-            # Check if the request was successful
             if response.status_code != 200:
                 raise Exception(f"Jisho API returned status code {response.status_code}")
 
@@ -118,16 +136,9 @@ def handle_ocr():
             if not json_data or 'data' not in json_data or not json_data['data']:
                 raise Exception("Word not found in dictionary.")
 
-            # Get the first match
             first_match = json_data['data'][0]
-            
-            # Get the reading (furigana)
             furigana = first_match['japanese'][0]['reading']
-            
-            # Get the word (kanji)
             text = first_match['japanese'][0].get('word', furigana)
-            
-            # Get the English definitions
             definitions = first_match['senses'][0]['english_definitions']
             translation = ", ".join(definitions)
             
@@ -138,7 +149,6 @@ def handle_ocr():
                 "furigana": furigana,
                 "translation": translation
             }
-
         except Exception as e:
             print(f"Error looking up on Jisho (or parsing): {e}")
             response_data = {
