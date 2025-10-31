@@ -1,4 +1,5 @@
 import sys
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import base64
@@ -10,19 +11,13 @@ import pytesseract
 from pytesseract import Output
 
 # --- Tesseract Configuration ---
-# 1. This tells pytesseract where to find the .exe you just installed.
-# 2. Check this path! If you installed Tesseract somewhere else, update this string.
-# 3. The 'r' at the beginning (r'...') is important. It means "raw string".
 try:
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-    # Test if it's working
     version = pytesseract.get_tesseract_version()
     print(f"Tesseract {version} found and configured.")
 except Exception as e:
     print("--- TESSERACT NOT FOUND ERROR ---")
     print(f"Error: {e}")
-    print(f"Please check that 'tesseract_cmd' is set to the correct path.")
-    print(r"Default is: C:\Program Files\Tesseract-OCR\tesseract.exe")
     sys.exit(1)
 # --- End of Configuration ---
 
@@ -34,9 +29,6 @@ print("Backend ready.")
 
 
 def decode_image_from_base64(data_url):
-    """
-    Takes a 'data:image/png;base64,...' string and returns a PIL Image
-    """
     try:
         _header, data = data_url.split(',', 1)
         image_bytes = base64.b64decode(data)
@@ -46,60 +38,43 @@ def decode_image_from_base64(data_url):
         print(f"Error decoding image: {e}")
         return None
 
-def find_word_at_cursor(ocr_results, x_logical, y_logical, pixelRatio):
-    """
-    Iterates through Tesseract's OCR results to find the text at the cursor.
-    Tesseract's data is different from easyocr's.
-    """
-    x_physical = x_logical * pixelRatio
-    y_physical = y_logical * pixelRatio
-    
-    print(f"Logical coords: ({x_logical}, {y_logical}). PixelRatio: {pixelRatio}. Physical coords: ({x_physical}, {y_physical})")
+def find_word_at_center(ocr_results, center_x, center_y):
+    print(f"Cropped image center: ({center_x}, {center_y})")
     
     target_text = None
-    # Tesseract's 'results' is a dictionary. We loop through each detected word.
     num_items = len(ocr_results['text'])
     
     for i in range(num_items):
-        # Get the bounding box of the word
         x_box = ocr_results['left'][i]
         y_box = ocr_results['top'][i]
         w = ocr_results['width'][i]
         h = ocr_results['height'][i]
-        
-        # Get the text (and clean it)
         text = ocr_results['text'][i].strip()
         
-        # Skip empty text (like whitespace)
         if not text:
             continue
             
-        # Check if the PHYSICAL cursor (x_physical, y_physical) is inside this box
-        if (x_box <= x_physical <= (x_box + w)) and (y_box <= y_physical <= (y_box + h)):
+        if (x_box <= center_x <= (x_box + w)) and (y_box <= center_y <= (y_box + h)):
             target_text = text
-            print(f"Found text: '{target_text}' at cursor.")
-            break # Found our word
+            print(f"Found text: '{target_text}' at center.")
+            break
             
     return target_text
 
 @app.route('/ocr-and-translate', methods=['POST'])
 def handle_ocr():
-    """
-    Receives screenshot and cursor, runs Tesseract OCR, finds the word,
-    and returns the word, furigana, and translation from Jisho.
-    """
     print("Received a new analysis request...")
     
     # 1. Get and validate JSON data
     try:
         data = request.json
         image_data_url = data.get('image_data')
-        x = data.get('x')
-        y = data.get('y')
-        pixelRatio = data.get('pixelRatio', 1.0) 
+        # --- NEW LOGIC ---
+        orientation = data.get('orientation', 'horizontal')
+        # --- END NEW LOGIC ---
 
-        if not image_data_url or x is None or y is None:
-            return jsonify({"error": "Missing 'image_data', 'x', or 'y'"}), 400
+        if not image_data_url:
+            return jsonify({"error": "Missing 'image_data'"}), 400
     except Exception as e:
         return jsonify({"error": f"Invalid JSON format: {e}"}), 400
 
@@ -107,21 +82,49 @@ def handle_ocr():
     pil_image = decode_image_from_base64(image_data_url)
     if pil_image is None:
         return jsonify({"error": "Failed to decode image"}), 400
+        
+    width, height = pil_image.size
+    target_x = width / 2
+    target_y = height / 2
 
-    # 3. --- Run Tesseract OCR ---
+    # 3. --- DYNAMIC TESSERACT CONFIG ---
+    lang_config = ''
+    psm_config = ''
+    if orientation == 'vertical':
+        print("Running Tesseract in VERTICAL mode.")
+        # Use vertical japanese, standard japanese, and english
+        lang_config = 'jpn_vert+jpn+eng'
+        # PSM 5: Assume a single uniform block of vertical text.
+        psm_config = '--psm 5'
+    else:
+        print("Running Tesseract in HORIZONTAL mode.")
+        lang_config = 'jpn+eng'
+        # PSM 6: Assume a single uniform block of text. (More robust than default 3)
+        psm_config = '--psm 6'
+    # --- END DYNAMIC CONFIG ---
+
+    # 4. Run Tesseract OCR
     try:
-        print("Running Tesseract OCR on the image...")
-        # Use 'jpn+eng' to detect both Japanese and English
-        # output_type=Output.DICT makes it return a useful dictionary
-        results = pytesseract.image_to_data(pil_image, lang='jpn+eng', output_type=Output.DICT)
+        print(f"Running Tesseract data-dict (lang={lang_config}, psm={psm_config})...")
+        results = pytesseract.image_to_data(
+            pil_image, 
+            lang=lang_config, 
+            config=psm_config, 
+            output_type=Output.DICT
+        )
         print(f"Tesseract found {len(results['text'])} text block(s).")
     except Exception as e:
+        print(f"Tesseract OCR failed: {e}")
+        # This will fail if you didn't install 'jpn_vert'
+        if 'Failed loading language' in str(e):
+             print("--- ERROR: 'jpn_vert' language pack not found. ---")
+             print("--- Please re-run the Tesseract installer and add it. ---")
         return jsonify({"error": f"Tesseract OCR failed: {e}"}), 500
 
-    # 4. Find the word at the cursor
-    target_text = find_word_at_cursor(results, x, y, pixelRatio)
+    # 5. Find the word at the center
+    target_text = find_word_at_center(results, target_x, target_y)
     
-    # 5. Get Furigana and Translation from Jisho (This part is unchanged)
+    # 6. Get Furigana and Translation from Jisho
     if target_text:
         try:
             print(f"Looking up '{target_text}' on Jisho...")
@@ -157,15 +160,13 @@ def handle_ocr():
                 "translation": "(Could not find in dictionary)"
             }
     else:
-        # Cursor wasn't on any text
         response_data = {
             "text": "---",
             "furigana": "No text found",
-            "translation": "Cursor was not over any detectable text."
+            "translation": "Tesseract couldn't read the text at your cursor."
         }
         
     return jsonify(response_data)
-
 
 # Standard Python entry point
 if __name__ == '__main__':
