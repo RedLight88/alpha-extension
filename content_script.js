@@ -23,7 +23,7 @@
 
       // --- NEW LOGIC ---
       // Check if Alt key is also pressed
-      const orientation = e.altKey ? "vertical" : "horizontal";
+      const orientation = e.ctrlKey ? "vertical" : "horizontal";
       // --- END NEW LOGIC ---
 
       showDialog(mouseX, mouseY); 

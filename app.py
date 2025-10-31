@@ -93,7 +93,7 @@ def handle_ocr():
     if orientation == 'vertical':
         print("Running Tesseract in VERTICAL mode.")
         # Use vertical japanese, standard japanese, and english
-        lang_config = 'jpn_vert+jpn+eng'
+        lang_config = 'jpn_vert+jpn'
         # PSM 5: Assume a single uniform block of vertical text.
         psm_config = '--psm 5'
     else:
