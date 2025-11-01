@@ -68,8 +68,6 @@
     if (Array.isArray(response) && response.length > 0) {
       
       contentHtml = response.map(item => {
-        // --- THIS IS THE FIX ---
-        // We force one line, hide overflow, and add ellipsis
         return `
           <div style="
             font-size: ${textFontSize}; 
@@ -85,7 +83,6 @@
             <span style="color: #aaa; font-size: ${translationFontSize};"> - ${escapeHtml(item.translation)}</span>
           </div>
         `
-        // --- END FIX ---
       }).join('');
 
     } else {
@@ -96,14 +93,11 @@
     }
 
     // 2. Set dialog structure
+    // --- THIS IS THE FIX (Part 1) ---
+    // Removed height calculation. Added flex: 1 to make it fill space.
     d.innerHTML = `
       <h3 style="margin:0 0 12px 0; text-align:center; color: #888; font-size: ${headerFontSize}; border-bottom: 1px solid #444; padding-bottom: 8px;">AlphaOCR</h3>
-      <div id="${CONTENT_ID}" style="
-        overflow-y:auto; 
-        overflow-x: hidden; 
-        height:calc(100% - 45px); 
-        padding-right: 5px;
-      ">
+      <div id="${CONTENT_ID}" style="flex: 1 1 auto; overflow-y:auto; overflow-x: hidden; padding-right: 5px;">
         ${contentHtml}
       </div>
     `;
@@ -121,11 +115,13 @@
     let finalLeft = x + CURSOR_OFFSET;
     let finalTop = y + CURSOR_OFFSET;
 
+    // Check horizontal
     if (finalLeft + DIALOG_WIDTH > viewportWidth) {
       finalLeft = x - DIALOG_WIDTH - CURSOR_OFFSET;
       if (finalLeft < 0) finalLeft = 0;
     }
 
+    // Check vertical
     if (finalTop + DIALOG_MAX_HEIGHT_PX > viewportHeight) {
       finalTop = y - DIALOG_MAX_HEIGHT_PX - CURSOR_OFFSET;
     }
@@ -148,6 +144,10 @@
       fontFamily: 'system-ui, sans-serif',
       color: '#eee',
       backdropFilter: 'blur(10px)',
+      // --- THIS IS THE FIX (Part 2) ---
+      // Make the dialog a flex container
+      display: 'flex',
+      flexDirection: 'column',
     });
 
     // 4. Center content *only* if it's an error/loading message
@@ -184,3 +184,4 @@
   }
 
 })();
+
