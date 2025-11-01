@@ -8,7 +8,7 @@ import numpy
 from PIL import Image
 import requests
 from manga_ocr import MangaOcr
-import re # <-- NEW IMPORT for regex
+import re # Import for regex
 
 # --- MangaOcr Configuration ---
 try:
@@ -16,7 +16,9 @@ try:
     mocr = MangaOcr()
     print("MangaOcr model loaded successfully.")
 except Exception as e:
-    print("--- MANGA-OCR NOT FOUND ERROR ---\nError: {e}\nCheck pip install manga-ocr.")
+    print("--- MANGA-OCR NOT FOUND ERROR ---")
+    print(f"Error: {e}")
+    print("Please make sure you have run 'pip install manga-ocr'")
     sys.exit(1)
 # --- End of Configuration ---
 
@@ -53,7 +55,7 @@ def decode_image_from_base_64(data_url):
 def handle_ocr():
     """
     Receives a *pre-cropped* screenshot, runs MangaOcr,
-    joins all found text, and looks it up on Jisho.
+    filters for Kanji words, and looks them up on Jisho.
     """
     print("Received a new analysis request...")
     
@@ -83,13 +85,10 @@ def handle_ocr():
         print(f"MangaOcr failed: {e}")
         return jsonify({"error": f"MangaOcr failed: {e}"}), 500
 
-    # --- NEW OPTIMIZED LOGIC ---
-    
     # This will be our list of results to send back
     response_data = []
 
     if not ocr_results:
-        # MangaOcr found nothing
         response_data = [{"error": "MangaOcr couldn't read the text."}]
         return jsonify(response_data)
 
@@ -133,16 +132,13 @@ def handle_ocr():
                     "translation": "(Could not find in dictionary)"
                 })
         else:
-            # --- Word is ONLY Kana, don't look it up ---
+            # --- THIS IS THE FIX ---
+            # Word is ONLY Kana, so we do nothing and it won't be shown.
             print(f"Skipping Jisho for KANA word: '{target_text}'")
-            response_data.append({
-                "text": target_text,
-                "furigana": "", # No furigana needed for kana
-                "translation": "(Kana)"
-            })
+            pass
+            # --- END FIX ---
             
     return jsonify(response_data)
-    # --- END NEW OPTIMIZED LOGIC ---
 
 # Standard Python entry point
 if __name__ == '__main__':
