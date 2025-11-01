@@ -21,34 +21,21 @@
         return;
       }
 
-      // --- NEW LOGIC ---
-      // Check if Alt key is also pressed
-      const orientation = e.ctrlKey ? "vertical" : "horizontal";
-      // --- END NEW LOGIC ---
+      const orientation = e.altKey ? "vertical" : "horizontal";
 
-      showDialog(mouseX, mouseY); 
-      updateDialog(`⏳ Analyzing (${orientation})...`); // Show the mode
-      
+      // --- LOGIC FIX: Don't show dialog until after capture ---
       chrome.runtime.sendMessage({
         action: "captureAndAnalyze",
         x: mouseX,
         y: mouseY,
         pixelRatio: window.devicePixelRatio,
-        orientation: orientation // Pass the new flag
+        orientation: orientation
       }, (response) => {
-        if (!isVisible) return; 
+        if (isVisible) return; 
 
-        if (response && response.text) {
-          const formattedHtml = `
-            <div style="font-size: 24px; margin-bottom: 8px; color: #eee; word-wrap: break-word;">${escapeHtml(response.furigana)}</div>
-            <div style="font-size: 18px; color: #fff; word-wrap: break-word;">${escapeHtml(response.text)}</div>
-            <hr style="border: 0; border-top: 1px solid #444; margin: 12px 0;">
-            <div style="font-size: 16px; color: #ccc; white-space: pre-wrap; word-wrap: break-word;">${escapeHtml(response.translation)}</div>
-          `;
-          updateDialogHtml(formattedHtml);
-        } else {
-          updateDialog(response.error || "❌ Analysis failed.");
-        }
+        // 1. NOW show the dialog
+        // We pass the response so it can be populated immediately
+        showDialog(mouseX, mouseY, response);
       });
     }
     
@@ -67,27 +54,77 @@
   }, true);
 
   /**
-   * Creates and displays the dialog with a default loading state.
+   * Creates and displays the dialog, checking viewport boundaries.
+   * Now also populates the content immediately.
    */
-  function showDialog(x, y) {
-    hideDialog();
+  function showDialog(x, y, response) {
+    hideDialog(); // Ensure only one dialog exists
     const d = document.createElement('div');
     d.id = DIALOG_ID;
+
+    // --- NEW: Use clamp() for fluid typography ---
+    // clamp(MIN, PREFERRED, MAX)
+    const headerFontSize = "clamp(12px, 1.4vw, 18px)";
+    const loadingFontSize = "clamp(14px, 1.5vw, 18px)";
     
+    // 1. Set initial "Loading" or "Error" content
+    let contentHtml = '';
+    if (response && response.text) {
+      const furiganaFontSize = "clamp(16px, 2vw, 26px)";
+      const textFontSize = "clamp(14px, 1.6vw, 20px)";
+      const translationFontSize = "clamp(12px, 1.4vw, 18px)";
+
+      contentHtml = `
+        <div style="font-size: ${furiganaFontSize}; margin-bottom: 8px; color: #eee; word-wrap: break-word;">${escapeHtml(response.furigana)}</div>
+        <div style="font-size: ${textFontSize}; color: #fff; word-wrap: break-word;">${escapeHtml(response.text)}</div>
+        <hr style="border: 0; border-top: 1px solid #444; margin: 12px 0;">
+        <div style="font-size: ${translationFontSize}; color: #ccc; white-space: pre-wrap; word-wrap: break-word;">${escapeHtml(response.translation)}</div>
+      `;
+    } else {
+      const errorText = response.error || "❌ Analysis failed.";
+      contentHtml = `<div style="font-size: ${loadingFontSize};">${escapeHtml(errorText)}</div>`;
+    }
+
+    // 2. Set dialog structure
     d.innerHTML = `
-      <h3 style="margin:0 0 8px 0; font-size:16px; text-align:center; color: #888;">AlphaOCR</h3>
-      <div id="${CONTENT_ID}" style="white-space:pre-wrap; overflow:auto; height:calc(100% - 34px); display: flex; align-items: center; justify-content: center; color: #aaa;">
-        ⏳ Capturing...
+      <h3 style="margin:0 0 8px 0; text-align:center; color: #888; font-size: ${headerFontSize};">AlphaOCR</h3>
+      <div id="${CONTENT_ID}" style="white-space:pre-wrap; overflow:auto; height:calc(100% - 34px);">
+        ${contentHtml}
       </div>
     `;
+
+    // 3. Set dialog positioning and static styles
+    const DIALOG_WIDTH = 300; // 300px logical width
+    const DIALOG_MIN_HEIGHT = 200; // 200px logical min-height
+    const CURSOR_OFFSET = 12;
+
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+
+    let finalLeft = x + CURSOR_OFFSET;
+    let finalTop = y + CURSOR_OFFSET;
+
+    // Check if it goes off-screen horizontally (right side)
+    if (finalLeft + DIALOG_WIDTH > viewportWidth) {
+      finalLeft = x - DIALOG_WIDTH - CURSOR_OFFSET;
+      if (finalLeft < 0) finalLeft = 0;
+    }
+
+    // Check if it goes off-screen vertically (bottom side)
+    if (finalTop + DIALOG_MIN_HEIGHT > viewportHeight) {
+      finalTop = y - DIALOG_MIN_HEIGHT - CURSOR_OFFSET;
+      if (finalTop < 0) finalTop = 0;
+    }
     
     Object.assign(d.style, {
       position: 'fixed',
-      left: `${x + 12}px`,
-      top: `${y + 12}px`,
-      width: '300px',
-      minHeight: '200px',
-      maxHeight: '400px',
+      left: `${finalLeft}px`,
+      top: `${finalTop}px`,
+      width: `${DIALOG_WIDTH}px`,
+      minHeight: `${DIALOG_MIN_HEIGHT}px`,
+      // Safety nets:
+      maxWidth: '90vw', 
+      maxHeight: '80vh', 
       zIndex: 2147483647,
       background: 'rgba(20, 20, 20, 0.95)',
       border: '1px solid rgba(255, 255, 255, 0.1)',
@@ -96,11 +133,21 @@
       padding: '12px',
       boxSizing: 'border-box',
       fontFamily: 'system-ui, sans-serif',
-      fontSize: '14px',
       color: '#eee',
       overflow: 'hidden',
       backdropFilter: 'blur(10px)',
     });
+
+    // 4. Center content *only* if it's an error/loading message
+    const contentDiv = d.querySelector(`#${CONTENT_ID}`);
+    if (!response || !response.text) {
+      Object.assign(contentDiv.style, {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      });
+    }
+
     document.documentElement.appendChild(d);
     isVisible = true;
   }
@@ -119,31 +166,10 @@
     return false;
   }
 
-  function updateDialog(text) {
-    const container = document.getElementById(CONTENT_ID);
-    if (container) {
-      container.textContent = text || '...';
-      Object.assign(container.style, {
-         display: 'flex',
-         alignItems: 'center',
-         justifyContent: 'center',
-         whiteSpace: 'pre-wrap'
-      });
-    }
-  }
-
-  function updateDialogHtml(html) {
-    const container = document.getElementById(CONTENT_ID);
-    if (container) {
-      container.innerHTML = html;
-       Object.assign(container.style, {
-         display: 'block',
-         alignItems: 'initial',
-         justifyContent: 'initial',
-         whiteSpace: 'pre-wrap'
-      });
-    }
-  }
+  // --- These functions are no longer needed, as `showDialog` does it all ---
+  // function updateDialog(text) { ... }
+  // function updateDialogHtml(html) { ... }
+  // ---
 
   function escapeHtml(str) {
     if (str == null) return '';
