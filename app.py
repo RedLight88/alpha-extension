@@ -9,6 +9,7 @@ from PIL import Image
 import requests
 import pytesseract
 from pytesseract import Output
+import math 
 
 # --- Tesseract Configuration ---
 try:
@@ -38,27 +39,41 @@ def decode_image_from_base64(data_url):
         print(f"Error decoding image: {e}")
         return None
 
-def find_word_at_center(ocr_results, center_x, center_y):
+def find_word_closest_to_center(ocr_results, center_x, center_y):
+    """
+    Iterates through Tesseract's results to find the text
+    CLOSEST to the center of the cropped image.
+    """
     print(f"Cropped image center: ({center_x}, {center_y})")
     
     target_text = None
+    min_distance = float('inf') 
+    
     num_items = len(ocr_results['text'])
     
     for i in range(num_items):
-        x_box = ocr_results['left'][i]
-        y_box = ocr_results['top'][i]
-        w = ocr_results['width'][i]
-        h = ocr_results['height'][i]
         text = ocr_results['text'][i].strip()
         
         if not text:
             continue
             
-        if (x_box <= center_x <= (x_box + w)) and (y_box <= center_y <= (y_box + h)):
+        x_box = ocr_results['left'][i]
+        y_box = ocr_results['top'][i]
+        w = ocr_results['width'][i]
+        h = ocr_results['height'][i]
+        
+        word_center_x = x_box + (w / 2)
+        word_center_y = y_box + (h / 2)
+        
+        distance = math.sqrt((word_center_x - center_x)**2 + (word_center_y - center_y)**2)
+        
+        if distance < min_distance:
+            min_distance = distance
             target_text = text
-            print(f"Found text: '{target_text}' at center.")
-            break
             
+    if target_text:
+        print(f"Found closest text: '{target_text}' (Distance: {min_distance:.2f}px)")
+        
     return target_text
 
 @app.route('/ocr-and-translate', methods=['POST'])
@@ -69,9 +84,7 @@ def handle_ocr():
     try:
         data = request.json
         image_data_url = data.get('image_data')
-        # --- NEW LOGIC ---
         orientation = data.get('orientation', 'horizontal')
-        # --- END NEW LOGIC ---
 
         if not image_data_url:
             return jsonify({"error": "Missing 'image_data'"}), 400
@@ -92,14 +105,11 @@ def handle_ocr():
     psm_config = ''
     if orientation == 'vertical':
         print("Running Tesseract in VERTICAL mode.")
-        # Use vertical japanese, standard japanese, and english
-        lang_config = 'jpn_vert+jpn'
-        # PSM 5: Assume a single uniform block of vertical text.
+        lang_config = 'jpn_vert+jpn+eng'
         psm_config = '--psm 5'
     else:
         print("Running Tesseract in HORIZONTAL mode.")
         lang_config = 'jpn+eng'
-        # PSM 6: Assume a single uniform block of text. (More robust than default 3)
         psm_config = '--psm 6'
     # --- END DYNAMIC CONFIG ---
 
@@ -115,14 +125,13 @@ def handle_ocr():
         print(f"Tesseract found {len(results['text'])} text block(s).")
     except Exception as e:
         print(f"Tesseract OCR failed: {e}")
-        # This will fail if you didn't install 'jpn_vert'
         if 'Failed loading language' in str(e):
              print("--- ERROR: 'jpn_vert' language pack not found. ---")
              print("--- Please re-run the Tesseract installer and add it. ---")
         return jsonify({"error": f"Tesseract OCR failed: {e}"}), 500
 
     # 5. Find the word at the center
-    target_text = find_word_at_center(results, target_x, target_y)
+    target_text = find_word_closest_to_center(results, target_x, target_y)
     
     # 6. Get Furigana and Translation from Jisho
     if target_text:
@@ -141,7 +150,9 @@ def handle_ocr():
 
             first_match = json_data['data'][0]
             furigana = first_match['japanese'][0]['reading']
+            # --- THIS IS THE FIXED LINE ---
             text = first_match['japanese'][0].get('word', furigana)
+            # --- END FIX ---
             definitions = first_match['senses'][0]['english_definitions']
             translation = ", ".join(definitions)
             
@@ -172,4 +183,3 @@ def handle_ocr():
 if __name__ == '__main__':
     print("Starting Flask server on http://localhost:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
-
