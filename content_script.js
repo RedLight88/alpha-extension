@@ -23,7 +23,6 @@
 
       const orientation = e.altKey ? "vertical" : "horizontal";
 
-      // --- LOGIC FIX: Don't show dialog until after capture ---
       chrome.runtime.sendMessage({
         action: "captureAndAnalyze",
         x: mouseX,
@@ -32,9 +31,6 @@
         orientation: orientation
       }, (response) => {
         if (isVisible) return; 
-
-        // 1. NOW show the dialog
-        // We pass the response so it can be populated immediately
         showDialog(mouseX, mouseY, response);
       });
     }
@@ -62,69 +58,86 @@
     const d = document.createElement('div');
     d.id = DIALOG_ID;
 
-    // --- NEW: Use clamp() for fluid typography ---
-    // clamp(MIN, PREFERRED, MAX)
     const headerFontSize = "clamp(12px, 1.4vw, 18px)";
-    const loadingFontSize = "clamp(14px, 1.5vw, 18px)";
+    const textFontSize = "clamp(14px, 1.6vw, 19px)"; // Main text
+    const furiganaFontSize = "clamp(11px, 1.2vw, 16px)"; // Smaller furigana
+    const translationFontSize = "clamp(12px, 1.4vw, 17px)"; // Slightly smaller translation
     
-    // 1. Set initial "Loading" or "Error" content
     let contentHtml = '';
-    if (response && response.text) {
-      const furiganaFontSize = "clamp(16px, 2vw, 26px)";
-      const textFontSize = "clamp(14px, 1.6vw, 20px)";
-      const translationFontSize = "clamp(12px, 1.4vw, 18px)";
+    
+    if (Array.isArray(response) && response.length > 0) {
+      
+      contentHtml = response.map(item => {
+        // --- THIS IS THE FIX ---
+        // We force one line, hide overflow, and add ellipsis
+        return `
+          <div style="
+            font-size: ${textFontSize}; 
+            margin-bottom: 12px; 
+            line-height: 1.4; 
+            white-space: nowrap; 
+            overflow: hidden; 
+            text-overflow: ellipsis;
+            padding-bottom: 2px;
+          ">
+            <span style="color: #fff; font-weight: 600;">${escapeHtml(item.text)}</span>
+            <span style="color: #ccc; font-size: ${furiganaFontSize};"> (${escapeHtml(item.furigana)})</span>
+            <span style="color: #aaa; font-size: ${translationFontSize};"> - ${escapeHtml(item.translation)}</span>
+          </div>
+        `
+        // --- END FIX ---
+      }).join('');
 
-      contentHtml = `
-        <div style="font-size: ${furiganaFontSize}; margin-bottom: 8px; color: #eee; word-wrap: break-word;">${escapeHtml(response.furigana)}</div>
-        <div style="font-size: ${textFontSize}; color: #fff; word-wrap: break-word;">${escapeHtml(response.text)}</div>
-        <hr style="border: 0; border-top: 1px solid #444; margin: 12px 0;">
-        <div style="font-size: ${translationFontSize}; color: #ccc; white-space: pre-wrap; word-wrap: break-word;">${escapeHtml(response.translation)}</div>
-      `;
     } else {
+      // It's an error or empty
+      const loadingFontSize = "clamp(14px, 1.5vw, 18px)";
       const errorText = response.error || "❌ Analysis failed.";
       contentHtml = `<div style="font-size: ${loadingFontSize};">${escapeHtml(errorText)}</div>`;
     }
 
     // 2. Set dialog structure
     d.innerHTML = `
-      <h3 style="margin:0 0 8px 0; text-align:center; color: #888; font-size: ${headerFontSize};">AlphaOCR</h3>
-      <div id="${CONTENT_ID}" style="white-space:pre-wrap; overflow:auto; height:calc(100% - 34px);">
+      <h3 style="margin:0 0 12px 0; text-align:center; color: #888; font-size: ${headerFontSize}; border-bottom: 1px solid #444; padding-bottom: 8px;">AlphaOCR</h3>
+      <div id="${CONTENT_ID}" style="
+        overflow-y:auto; 
+        overflow-x: hidden; 
+        height:calc(100% - 45px); 
+        padding-right: 5px;
+      ">
         ${contentHtml}
       </div>
     `;
 
     // 3. Set dialog positioning and static styles
-    const DIALOG_WIDTH = 300; // 300px logical width
-    const DIALOG_MIN_HEIGHT = 200; // 200px logical min-height
+    const DIALOG_WIDTH = 350; 
     const CURSOR_OFFSET = 12;
 
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
 
+    const DIALOG_MAX_HEIGHT_VH = 80; // 80vh
+    const DIALOG_MAX_HEIGHT_PX = viewportHeight * (DIALOG_MAX_HEIGHT_VH / 100);
+
     let finalLeft = x + CURSOR_OFFSET;
     let finalTop = y + CURSOR_OFFSET;
 
-    // Check if it goes off-screen horizontally (right side)
     if (finalLeft + DIALOG_WIDTH > viewportWidth) {
       finalLeft = x - DIALOG_WIDTH - CURSOR_OFFSET;
       if (finalLeft < 0) finalLeft = 0;
     }
 
-    // Check if it goes off-screen vertically (bottom side)
-    if (finalTop + DIALOG_MIN_HEIGHT > viewportHeight) {
-      finalTop = y - DIALOG_MIN_HEIGHT - CURSOR_OFFSET;
-      if (finalTop < 0) finalTop = 0;
+    if (finalTop + DIALOG_MAX_HEIGHT_PX > viewportHeight) {
+      finalTop = y - DIALOG_MAX_HEIGHT_PX - CURSOR_OFFSET;
     }
+    if (finalTop < 0) finalTop = 0;
     
     Object.assign(d.style, {
       position: 'fixed',
       left: `${finalLeft}px`,
       top: `${finalTop}px`,
       width: `${DIALOG_WIDTH}px`,
-      minHeight: `${DIALOG_MIN_HEIGHT}px`,
-      // Safety nets:
+      maxHeight: `${DIALOG_MAX_HEIGHT_VH}vh`, 
       maxWidth: '90vw', 
-      maxHeight: '80vh', 
       zIndex: 2147483647,
       background: 'rgba(20, 20, 20, 0.95)',
       border: '1px solid rgba(255, 255, 255, 0.1)',
@@ -134,13 +147,12 @@
       boxSizing: 'border-box',
       fontFamily: 'system-ui, sans-serif',
       color: '#eee',
-      overflow: 'hidden',
       backdropFilter: 'blur(10px)',
     });
 
     // 4. Center content *only* if it's an error/loading message
     const contentDiv = d.querySelector(`#${CONTENT_ID}`);
-    if (!response || !response.text) {
+    if (!Array.isArray(response) || response.length === 0) {
       Object.assign(contentDiv.style, {
         display: 'flex',
         alignItems: 'center',
@@ -166,15 +178,9 @@
     return false;
   }
 
-  // --- These functions are no longer needed, as `showDialog` does it all ---
-  // function updateDialog(text) { ... }
-  // function updateDialogHtml(html) { ... }
-  // ---
-
   function escapeHtml(str) {
     if (str == null) return '';
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
 })();
-
