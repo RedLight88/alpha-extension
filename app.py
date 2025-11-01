@@ -9,7 +9,7 @@ from PIL import Image
 import requests
 import pytesseract
 from pytesseract import Output
-import math 
+import math # Added for distance calculation
 
 # --- Tesseract Configuration ---
 try:
@@ -39,6 +39,7 @@ def decode_image_from_base64(data_url):
         print(f"Error decoding image: {e}")
         return None
 
+# --- UPDATED: Using "closest" logic, not "at" ---
 def find_word_closest_to_center(ocr_results, center_x, center_y):
     """
     Iterates through Tesseract's results to find the text
@@ -54,6 +55,7 @@ def find_word_closest_to_center(ocr_results, center_x, center_y):
     for i in range(num_items):
         text = ocr_results['text'][i].strip()
         
+        # Skip empty text blocks
         if not text:
             continue
             
@@ -62,11 +64,14 @@ def find_word_closest_to_center(ocr_results, center_x, center_y):
         w = ocr_results['width'][i]
         h = ocr_results['height'][i]
         
+        # Calculate the center of this word's bounding box
         word_center_x = x_box + (w / 2)
         word_center_y = y_box + (h / 2)
         
+        # Calculate Euclidean distance from image center to word center
         distance = math.sqrt((word_center_x - center_x)**2 + (word_center_y - center_y)**2)
         
+        # If this word is closer than the current minimum, it's our new target
         if distance < min_distance:
             min_distance = distance
             target_text = text
@@ -75,6 +80,7 @@ def find_word_closest_to_center(ocr_results, center_x, center_y):
         print(f"Found closest text: '{target_text}' (Distance: {min_distance:.2f}px)")
         
     return target_text
+# --- END UPDATED FUNCTION ---
 
 @app.route('/ocr-and-translate', methods=['POST'])
 def handle_ocr():
@@ -84,7 +90,9 @@ def handle_ocr():
     try:
         data = request.json
         image_data_url = data.get('image_data')
+        # --- FIXED: Read the orientation flag ---
         orientation = data.get('orientation', 'horizontal')
+        # --- END FIX ---
 
         if not image_data_url:
             return jsonify({"error": "Missing 'image_data'"}), 400
@@ -123,20 +131,49 @@ def handle_ocr():
             output_type=Output.DICT
         )
         print(f"Tesseract found {len(results['text'])} text block(s).")
+        
+        # --- NEW DEBUGGING CODE ---
+        try:
+            with open('ocr_debug.txt', 'w', encoding='utf-8') as f:
+                f.write(f"--- Tesseract OCR Debug Output ---\n")
+                f.write(f"Language: {lang_config}, PSM: {psm_config}\n")
+                f.write(f"Image Size: {width}x{height}px\n")
+                f.write(f"Target Center: ({target_x:.0f}, {target_y:.0f})\n")
+                f.write("-" * 40 + "\n")
+                f.write("Conf\tLeft\tTop\tWidth\tHeight\tText\n") # Header
+                
+                for i in range(len(results['text'])):
+                    conf = int(results['conf'][i])
+                    text = results['text'][i].strip()
+                    
+                    if not text or conf < 0:
+                        continue
+                    
+                    l = results['left'][i]
+                    t = results['top'][i]
+                    w = results['width'][i]
+                    h = results['height'][i]
+                    
+                    f.write(f"{conf}%\t{l}\t{t}\t{w}\t{h}\t{text}\n")
+            print("Debug file 'ocr_debug.txt' written successfully.")
+        except Exception as e:
+            print(f"Error writing debug file: {e}")
+        # --- END NEW DEBUGGING CODE ---
+
     except Exception as e:
         print(f"Tesseract OCR failed: {e}")
         if 'Failed loading language' in str(e):
              print("--- ERROR: 'jpn_vert' language pack not found. ---")
-             print("--- Please re-run the Tesseract installer and add it. ---")
         return jsonify({"error": f"Tesseract OCR failed: {e}"}), 500
 
-    # 5. Find the word at the center
+    # 5. Find the word (call updated function)
     target_text = find_word_closest_to_center(results, target_x, target_y)
     
     # 6. Get Furigana and Translation from Jisho
     if target_text:
         try:
             print(f"Looking up '{target_text}' on Jisho...")
+            # --- FIXED: Corrected URL typo ---
             jisho_url = f"https://jisho.org/api/v1/search/words?keyword={target_text}"
             response = requests.get(jisho_url)
             
@@ -150,9 +187,7 @@ def handle_ocr():
 
             first_match = json_data['data'][0]
             furigana = first_match['japanese'][0]['reading']
-            # --- THIS IS THE FIXED LINE ---
             text = first_match['japanese'][0].get('word', furigana)
-            # --- END FIX ---
             definitions = first_match['senses'][0]['english_definitions']
             translation = ", ".join(definitions)
             
@@ -178,6 +213,7 @@ def handle_ocr():
         }
         
     return jsonify(response_data)
+
 
 # Standard Python entry point
 if __name__ == '__main__':
