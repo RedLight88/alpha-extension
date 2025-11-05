@@ -39,7 +39,6 @@
         return;
       }
 
-      // --- This is the fix for the "captures itself" race condition ---
       // We do NOT show the dialog yet. We just send the message.
       
       // Send a message to our background.js service worker.
@@ -95,7 +94,6 @@
     const d = document.createElement('div'); // Create the main dialog <div>
     d.id = DIALOG_ID;
 
-    // --- Fluid Typography (The clamp() fix) ---
     // This makes the font size responsive to zoom, but with limits.
     // clamp(MIN_SIZE, PREFERRED_SIZE, MAX_SIZE)
     const headerFontSize = "clamp(12px, 1.4vw, 18px)";
@@ -116,7 +114,6 @@
            return `<div style="font-size: ${translationFontSize}; color: #888;">${escapeHtml(item.error)}</div>`;
         }
         
-        // --- This is the fix for the single-line layout ---
         // 'white-space: nowrap' forces it to one line.
         // 'overflow: hidden' and 'text-overflow: ellipsis' add the "..."
         // if the translation is too long.
@@ -144,7 +141,6 @@
       contentHtml = `<div style="font-size: ${loadingFontSize};">${escapeHtml(errorText)}</div>`;
     }
 
-    // --- Dialog Structure (Flexbox fix for scrollbar) ---
     // The inner div (#CONTENT_ID) has 'flex: 1' which tells it to
     // grow and fill the available space, which allows 'overflow-y:auto'
     // to work correctly.
@@ -195,7 +191,6 @@
       fontFamily: 'system-ui, sans-serif',
       color: '#eee',
       backdropFilter: 'blur(10px)',
-      // --- Flexbox fix for scrollbar ---
       display: 'flex',
       flexDirection: 'column',
     });
@@ -213,27 +208,17 @@
 
     // Finally, add the fully-built dialog to the webpage.
     document.documentElement.appendChild(d);
-    isVisible = true; // Set our state
+    isVisible = true;
   }
 
-  /**
-   * Function: hideDialog
-   * Input: (none)
-   * Output: (void) - Removes the dialog from the DOM.
-   */
   function hideDialog() {
     const existing = document.getElementById(DIALOG_ID);
     if (existing) {
       existing.remove(); // Remove the element from the webpage
     }
-    isVisible = false; // Set our state
+    isVisible = false;
   }
 
-  /**
-   * Function: isTypingArea
-   * Input: el (DOM Element) - The currently active element
-   * Output: (boolean) - True if the element is an input, textarea, etc.
-   */
   function isTypingArea(el) {
     if (!el) return false;
     const tag = (el.tagName || '').toLowerCase();
@@ -242,14 +227,14 @@
     return false;
   }
 
-  /**
-   * Function: escapeHtml
-   * Input: str (string) - A potentially unsafe string
-   * Output: (string) - A safe string to insert into .innerHTML
-   */
-  function escapeHtml(str) {
+  function escapeFull(str) {
     if (str == null) return '';
-    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
 })(); // End of the IIFE

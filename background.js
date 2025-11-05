@@ -1,4 +1,3 @@
-// The URL of our Python backend server.
 const YOUR_BACKEND_URL = 'http://localhost:5000/ocr-and-translate';
 
 // --- Event Listener 1: The Main Message Handler ---
@@ -17,11 +16,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
-      // --- Step 2: 1:1 Image Crop (The "Blurry" Fix) ---
+      // --- Step 2: 1:1 Image Crop  ---
       // This logic crops a crisp 400x400 square from the
       // screenshot, centered on the cursor, with no scaling.
       
-      const CROP_SIZE = 400; // We'll grab a 400x400 physical pixel crop
+      const CROP_SIZE = 400;
       const OUTPUT_CANVAS_SIZE = CROP_SIZE;
 
       // We must load the dataUrl into an image object.

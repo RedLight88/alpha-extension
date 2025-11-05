@@ -1,11 +1,8 @@
-# --- Imports ---
 import sys              # For exiting the script (sys.exit)
-import os               # (Not strictly used here, but good practice)
 from flask import Flask, request, jsonify  # The core Flask web server tools
 from flask_cors import CORS                # To allow requests from our extension
 import base64           # To decode the base64 image string
 import io               # To read the image data "in memory"
-import numpy            # (Not used by MangaOcr, but PIL/CV2 often need it)
 from PIL import Image    # To open and save the image
 import requests         # To make API calls to Jisho.org
 from manga_ocr import MangaOcr  # The OCR engine
@@ -20,7 +17,7 @@ try:
     mocr = MangaOcr()
     print("MangaOcr model loaded successfully.")
 except Exception as e:
-    # Handle failure (e.g., 'pip install manga-ocr' not run)
+    # Handle failure
     print("--- MANGA-OCR NOT FOUND ERROR ---")
     print(f"Error: {e}")
     print("Please make sure you have run 'pip install manga-ocr'")
