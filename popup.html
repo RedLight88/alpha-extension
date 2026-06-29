@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    body {
+      width: 260px;
+      margin: 0;
+      padding: 14px;
+      font-family: system-ui, sans-serif;
+      font-size: 13px;
+      color: #111;
+      background: #fff;
+    }
+    h1 {
+      margin: 0 0 8px 0;
+      font-size: 15px;
+    }
+    #output {
+      margin-top: 10px;
+      padding: 8px;
+      border-radius: 6px;
+      background: #f3f3f3;
+      color: #333;
+      white-space: pre-wrap;
+    }
+    ol {
+      margin: 8px 0;
+      padding-left: 18px;
+    }
+    li { margin-bottom: 4px; }
+    kbd {
+      background: #eee;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-family: inherit;
+    }
+  </style>
+</head>
+<body>
+  <h1>AlphaOCR</h1>
+  <ol>
+    <li>Make sure the local backend is running (<code>python app.py</code>).</li>
+    <li>Press <kbd>Left Ctrl</kbd>.</li>
+    <li>Drag a box over the Japanese text.</li>
+    <li>Release — the translation appears near the selection.</li>
+  </ol>
+  <div id="output">Waiting for selection…</div>
+  <script src="popup.js"></script>
+</body>
+</html>
