@@ -1,0 +1,19 @@
+# Python virtual environment
+venv/
+.venv/
+
+# Python caches / build
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# OCR debug artifacts
+debug_*.png
+
+# Backend launcher log (written by the native messaging host)
+backend.log
+
+# Editor / OS
+.DS_Store
+Thumbs.db

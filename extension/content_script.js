@@ -10,6 +10,13 @@
   let lastTranslation = null;
   let snipping = false;
   let startX = 0, startY = 0;
+  let enabled = false; // gated by the toolbar toggle (chrome.storage 'enabled')
+
+  // Load the toggle state and keep it live across changes from the popup.
+  chrome.storage.local.get({ enabled: false }, ({ enabled: e }) => { enabled = e; });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.enabled) enabled = changes.enabled.newValue;
+  });
 
   // Track mouse position (used to place the result dialog)
   document.addEventListener('mousemove', (e) => {
@@ -17,9 +24,10 @@
     mouseY = e.clientY;
   }, { capture: true, passive: true });
 
-  // Left Ctrl (pressed alone) starts the snip selection. Escape cancels.
+  // Shift (pressed alone) starts the snip selection — only while enabled. Escape cancels.
   document.addEventListener('keydown', (e) => {
-    if (e.code === 'ControlLeft' && !e.repeat) {
+    if (e.key === 'Shift' && !e.repeat) {
+      if (!enabled) return;
       if (isTypingArea(document.activeElement)) return;
       if (snipping) return;
       startSnip();
@@ -44,16 +52,16 @@
       inset: '0',
       zIndex: 2147483646,
       cursor: 'crosshair',
-      background: 'rgba(0,0,0,0.25)',
+      background: 'rgba(0,0,0,0.12)',
     });
 
     const selection = document.createElement('div');
     selection.id = SELECTION_ID;
     Object.assign(selection.style, {
       position: 'fixed',
-      border: '1.5px dashed #fff',
-      background: 'rgba(255,255,255,0.12)',
-      boxShadow: '0 0 0 1px rgba(0,0,0,0.4)',
+      border: '1px solid #fff',
+      background: 'transparent',
+      boxShadow: '0 0 0 1px rgba(0,0,0,0.5)',
       display: 'none',
       pointerEvents: 'none',
     });
@@ -179,30 +187,68 @@
     d.id = DIALOG_ID;
     const initialText = lastTranslation || 'No text yet';
     d.innerHTML = `
-      <h3 style="margin:0 0 8px 0; font-size:16px; text-align:center; color:#111;">Translation</h3>
-      <div id="${CONTENT_ID}" style="white-space:pre-wrap;overflow:auto;height:calc(100% - 34px);color:#111;">
+      <h3 id="${DIALOG_ID}-header" style="margin:0 0 8px 0; font-size:16px; text-align:center; color:#111; cursor:move; user-select:none;">Translation</h3>
+      <div id="${CONTENT_ID}" style="white-space:pre-wrap;overflow:auto;min-height:0;flex:1 1 auto;color:#111;">
         ${escapeHtml(initialText)}
       </div>
     `;
+
+    // Size to content (so few words = small box, many words = larger), but cap
+    // to a fraction of the viewport. The vw/vh caps scale with page zoom, and
+    // overflow scrolls once the content exceeds the cap.
     Object.assign(d.style, {
       position: 'fixed',
-      left: `${Math.max(8, x)}px`,
-      top: `${Math.max(8, y)}px`,
-      width: '300px',
-      height: '300px',
+      left: `${x}px`,
+      top: `${y}px`,
+      display: 'flex',
+      flexDirection: 'column',
+      width: 'max-content',
+      minWidth: '120px',
+      maxWidth: 'min(360px, 90vw)',
+      maxHeight: 'min(70vh, 460px)',
       zIndex: 2147483647,
       background: '#ffffff',
       border: '1px solid rgba(0,0,0,0.2)',
       borderRadius: '8px',
       boxShadow: '0 8px 24px rgba(0,0,0,0.25)',
-      padding: '12px',
+      padding: '10px 12px',
       boxSizing: 'border-box',
       fontFamily: 'system-ui, sans-serif',
       fontSize: '14px',
       color: '#111',
-      overflow: 'hidden',
     });
     document.documentElement.appendChild(d);
+    clampToViewport(d, x, y);
+    makeDraggable(d, document.getElementById(`${DIALOG_ID}-header`));
+  }
+
+  // Keep the whole dialog on screen given its current rendered size.
+  function clampToViewport(d, desiredLeft, desiredTop) {
+    const margin = 8;
+    const maxLeft = Math.max(margin, window.innerWidth - d.offsetWidth - margin);
+    const maxTop = Math.max(margin, window.innerHeight - d.offsetHeight - margin);
+    d.style.left = `${Math.min(Math.max(margin, desiredLeft), maxLeft)}px`;
+    d.style.top = `${Math.min(Math.max(margin, desiredTop), maxTop)}px`;
+  }
+
+  // Let the user drag the dialog around by its header.
+  function makeDraggable(d, handle) {
+    if (!handle) return;
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const origLeft = d.offsetLeft;
+      const origTop = d.offsetTop;
+
+      const onMove = (ev) => clampToViewport(d, origLeft + (ev.clientX - startX), origTop + (ev.clientY - startY));
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove, true);
+        document.removeEventListener('mouseup', onUp, true);
+      };
+      document.addEventListener('mousemove', onMove, true);
+      document.addEventListener('mouseup', onUp, true);
+    }, true);
   }
 
   function hideDialog() {
@@ -222,6 +268,9 @@
     lastTranslation = text == null ? null : String(text);
     const container = document.getElementById(CONTENT_ID);
     if (container) container.textContent = lastTranslation || 'No text yet';
+    // Content (and therefore size) changed — keep the box on screen.
+    const d = document.getElementById(DIALOG_ID);
+    if (d) clampToViewport(d, d.offsetLeft, d.offsetTop);
   }
 
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {

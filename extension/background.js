@@ -4,6 +4,28 @@ console.log("AlphaOCR background service worker running");
 
 const OCR_ENDPOINT = "http://127.0.0.1:5000/ocr-and-translate";
 
+// --- Enabled toggle: badge + default state -------------------------------
+
+function updateBadge(enabled) {
+  chrome.action.setBadgeText({ text: enabled ? "ON" : "" });
+  chrome.action.setBadgeBackgroundColor({ color: "#2e7d32" });
+}
+
+// Set the default the first time the extension is installed.
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.storage.local.get({ enabled: false }, ({ enabled }) => updateBadge(enabled));
+});
+
+// Keep the badge in sync whenever the toggle changes (from the popup).
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.enabled) {
+    updateBadge(changes.enabled.newValue);
+  }
+});
+
+// The service worker can be torn down and restarted; restore the badge on wake.
+chrome.storage.local.get({ enabled: false }, ({ enabled }) => updateBadge(enabled));
+
 // Format the backend's list response into a readable string for the dialog.
 // Backend returns [{text, furigana, translation}] or [{error}] (see app.py).
 function formatOcrResults(data) {

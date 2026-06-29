@@ -1,0 +1,9 @@
+{
+    "name":  "com.alphaocr.launcher",
+    "description":  "AlphaOCR backend launcher",
+    "path":  "alphaocr_launcher.bat",
+    "type":  "stdio",
+    "allowed_origins":  [
+                            "chrome-extension://jfoijkeefkmlkcfghgdepemcgbnhaohe/"
+                        ]
+}
