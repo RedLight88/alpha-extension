@@ -28,17 +28,17 @@ where the text isn't selectable.
 ## How it works
 
 ```
-┌──────────────────────────── Chrome extension (MV3) ───────────────────────────┐
-│  content_script.js   Shift+drag → screenshot request → crop → show popup        │
-│  background.js        captureVisibleTab; POST crop to backend; relay result      │
-│  popup.html/js        toggle snipping on/off; Start/Stop the backend             │
-└───────────────────────────────────────┬────────────────────────────────────────┘
-                                         │  HTTP (localhost:5000)
-                                         ▼
-┌──────────────────────────── Python backend (app.py) ──────────────────────────┐
-│  /ocr-and-translate   MangaOcr (image→text) → fugashi (split words) → Jisho      │
-│  /health  /shutdown   status probe / stop the server                            │
-└─────────────────────────────────────────────────────────────────────────────────┘
++------------------------- Chrome extension (MV3) --------------------------+
+|  content_script.js    Shift+drag -> screenshot -> crop -> show popup      |
+|  background.js         captureVisibleTab; POST crop; relay result         |
+|  popup.html/js         toggle snipping; Start/Stop the backend            |
++---------------------------------------------------------------------------+
+                                      |  HTTP (localhost:5000)
+                                      v
++------------------------- Python backend (app.py) -------------------------+
+|  /ocr-and-translate    MangaOcr (image->text) -> fugashi -> Jisho         |
+|  /health  /shutdown    status probe / stop the server                     |
++---------------------------------------------------------------------------+
 ```
 
 The extension captures **screen pixels** (not the DOM), so it works on `<canvas>`, CSS background
