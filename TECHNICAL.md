@@ -43,8 +43,13 @@ crop rect×dpr onto a <canvas> → toDataURL('image/png')
                                  decode → MangaOcr → tokenize_words → lookup_jisho×N
                                     │
                                  [{text,furigana,translation}, ...]
-   ◄───────────────────────────  formatOcrResults() → string
-{action:'setTranslation', text} ► content_script.updateDialog()  (renders popup)
+   ◄───────────────────────────  formatOcrResults() → string (+ raw array)
+{action:'setTranslation', text, results} ► content_script.renderResults()  (popup)
+
+Then, optionally, from the popup's Anki footer:
+{action:'getDecks'}   ─► background ─► GET  /anki/decks       ─► AnkiConnect deckNames
+{action:'createDeck'} ─► background ─► POST /anki/create-deck ─► AnkiConnect createDeck
+{action:'ankiAdd'}    ─► background ─► POST /anki/add         ─► AnkiConnect addNotes
 ```
 
 Two reasons the screenshot round-trips back to the content script before cropping: only the
@@ -79,9 +84,9 @@ Runs in the page. Wrapped in an IIFE so nothing leaks to page globals.
 ### Module state
 | Variable | Purpose |
 |---|---|
-| `DIALOG_ID`, `CONTENT_ID`, `OVERLAY_ID`, `SELECTION_ID` | Fixed element IDs so the script can find/replace its own injected nodes. |
-| `mouseX, mouseY` | Latest cursor position, tracked on `mousemove`; used to place the popup. |
-| `lastTranslation` | Last text shown in the popup (reused as initial text on the next open). |
+| `DIALOG_ID`, `OVERLAY_ID`, `SELECTION_ID` | Fixed element IDs so the script can find/replace its own injected nodes. |
+| `lastResults` | The structured OCR array of the last snip (used to rebuild the popup / build Anki notes). |
+| `cachedDecks` | Anki deck names, fetched lazily and reused (refreshed once per successful snip). |
 | `snipping` | True while a selection drag is in progress. |
 | `startX, startY` | Where the current selection drag began. |
 | `enabled` | Mirror of the `chrome.storage.local` `enabled` flag; gates the Shift trigger. |
@@ -90,7 +95,6 @@ On load it reads `enabled` from storage and subscribes to `chrome.storage.onChan
 popup switch updates every open tab live.
 
 ### Event listeners
-- **`mousemove`** (capture, passive) — updates `mouseX/mouseY`.
 - **`keydown`** (capture):
   - `Shift` (not held-repeat, `enabled` true, not in a typing area, not already snipping) → `startSnip()`.
   - `Escape` → cancel an in-progress snip, otherwise close the popup.
@@ -116,25 +120,44 @@ popup switch updates every open tab live.
   `toDataURL('image/png')`, and posts `{action:'ocrImage', src}` to the background. The `×dpr`
   conversion maps CSS pixels (selection coordinates) to device pixels (screenshot resolution).
 
-### Result popup
-- **`showDialog(x, y)`** — builds the popup: a flex-column box with a draggable `<h3>` header and a
-  scrollable content div. Sizing is **content-driven** (`width:max-content; min-width:120px`) but
-  capped to `min(360px,90vw)` × `min(70vh,460px)` so it scales with page zoom and stays small for
-  short results. After insertion it calls `clampToViewport` and `makeDraggable`.
-- **`clampToViewport(d, left, top)`** — clamps the box's position using its rendered
-  `offsetWidth/Height` so it never spills off any edge (8px margin).
-- **`makeDraggable(d, handle)`** — on header `mousedown`, tracks the pointer and repositions the box
-  via `clampToViewport`; releases listeners on `mouseup`.
-- **`hideDialog()`** — removes the popup element.
-- **`updateDialog(text)`** — sets the content text (via `textContent`, so it's not HTML-injected),
-  stores it in `lastTranslation`, and re-clamps (size changed).
-- **`isTypingArea(el)`** — true for `<input>`, `<textarea>`, or `contenteditable`; used to ignore
-  Shift while typing.
-- **`escapeHtml(str)`** — used for the initial templated text (the live result uses `textContent`).
+### Result popup (Shadow DOM)
+The popup is a host `<div id=DIALOG_ID>` with an attached **Shadow DOM**, so page CSS can't leak into
+it (and vice-versa). The host carries only position/z-index inline; all visual styling lives in a
+`<style>` block (`DIALOG_STYLES`) inside the shadow root. Structure: a draggable `.hdr`, a `.body`
+(status line + context line + `.words`), and a `.footer` (deck `<select>`, **+ New deck** button,
+inline new-deck form, **Add to Anki** button, `.anki-status`).
+
+- **`showDialog(x, y)`** — builds the host + shadow tree, wires the footer, clamps, and makes it
+  draggable. Renders `lastResults` if present, else shows "No text yet". Sizing is content-driven
+  (`width:max-content`) but capped to `min(380px,90vw)` × `min(70vh,480px)`.
+- **`setStatus(text)`** — shows a transient message (capturing / sending / error) and hides the word
+  list + footer.
+- **`renderResults(results)`** — stores `lastResults`; shows the full line as `.context`; renders one
+  checkbox row per word entry (`label > input[checkbox] + span`, built with `textContent` so OCR text
+  is never HTML-injected); reveals the footer and calls `loadDecks` when there are words. Error/empty
+  payloads (`[{error}]`) fall back to `setStatus`.
+- **`wireFooter` / `loadDecks` / `createDeck` / `addToAnki`** — the Anki controls (see §6.5).
+- **`clampToViewport(host, left, top)`** — clamps using rendered `offsetWidth/Height` (8px margin);
+  **`reclamp()`** re-clamps at the current position after content/size changes.
+- **`makeDraggable(host, handle)`** — on header `mousedown`, tracks the pointer and repositions via
+  `clampToViewport`; releases listeners on `mouseup`.
+- **`hideDialog()`** — removes the host element. **`getShadow()`** — returns the live shadow root.
+- **`isTypingArea(el)`** — true for `<input>`, `<textarea>`, or `contenteditable`; ignores Shift
+  while typing.
+
+### Anki footer (§6.5 of this file describes the contracts)
+- **`wireFooter(shadow)`** — binds the **+ New deck** toggle (reveals/focuses the inline form),
+  Create/Cancel, Enter/Escape on the input, and the **Add to Anki** click.
+- **`loadDecks(shadow)`** — uses `cachedDecks` if set, else sends `{action:'getDecks'}`; populates the
+  `<select>`. On failure (Anki not running) it disables the deck controls and shows the error.
+- **`createDeck(shadow)`** — sends `{action:'createDeck', deck}`; on success appends to `cachedDecks`,
+  re-selects it, and hides the form.
+- **`addToAnki(shadow)`** — collects checked rows into `notes:[{word,reading,meaning}]` from
+  `lastResults`, sends `{action:'ankiAdd', deck, notes}`, and reports `✓ Added N (M skipped)`.
 
 ### Incoming messages
-A `chrome.runtime.onMessage` listener handles `{action:'setTranslation', text}` from the background
-and renders it via `updateDialog`.
+A `chrome.runtime.onMessage` listener handles `{action:'setTranslation', text, results}` from the
+background: it renders `results` via `renderResults` when present, else shows `text` via `setStatus`.
 
 ---
 
@@ -142,18 +165,26 @@ and renders it via `updateDialog`.
 
 The MV3 service worker (event-driven; may be torn down and restarted at any time).
 
-- **`OCR_ENDPOINT`** — `http://127.0.0.1:5000/ocr-and-translate`.
+- **`BACKEND_BASE`** — `http://127.0.0.1:5000`; the OCR + `/anki/*` URLs are derived from it (one
+  place to change the port on the extension side).
+- **`fetchJson(url, options, timeoutMs)`** — `fetch` wrapped in an `AbortController` timeout (30s for
+  OCR, 10s for Anki) that parses JSON and throws a clean `Error` (using the body's `error`, the HTTP
+  status, or `"Request timed out"`). Used by every backend call so a hung backend can't wedge the UI.
 - **`updateBadge(enabled)`** — sets the toolbar badge to `"ON"` (green) or empty.
   - Wired to `chrome.runtime.onInstalled` (default state), `chrome.storage.onChanged` (live updates),
     and a top-level read (restores the badge after the worker wakes).
-- **`formatOcrResults(data)`** — turns the backend's array into the popup string. Each entry becomes
-  `text（furigana）— translation`; `furigana` is omitted when equal to `text` or empty; `translation`
-  is omitted when empty; `{error}` entries pass through verbatim. Empty/invalid → `"⚠️ No text detected"`.
+- **`formatOcrResults(data)`** — turns the backend's array into the fallback popup string. Each entry
+  becomes `text（furigana）— translation`; `furigana` is omitted when equal to `text` or empty;
+  `translation` is omitted when empty; `{error}` entries pass through verbatim. Empty/invalid →
+  `"⚠️ No text detected"`.
 - **`chrome.runtime.onMessage` router** (returns `true` to keep `sendResponse` async):
   - **`snip`** → `captureVisibleTab(windowId, {format:'png'})`; replies `{screenshot}` or `{error}`.
-  - **`ocrImage`** → `POST` the cropped data URL as `{image_data}`; on success formats the result and
-    both **replies** `{ok, text}` to the caller and **broadcasts** `{action:'setTranslation', text}`
-    to the tab; on failure broadcasts `"❌ Backend not responding"`.
+  - **`ocrImage`** → `POST` the cropped data URL as `{image_data}`; on success both **replies**
+    `{ok, text, results}` and **broadcasts** `{action:'setTranslation', text, results}` (the raw array
+    drives the per-word checkboxes); on failure broadcasts `"❌ <message>"`.
+  - **`getDecks`** → `GET /anki/decks`; replies `{ok, decks}` / `{ok:false, error}`.
+  - **`createDeck`** → `POST /anki/create-deck`; replies `{ok, deck}` / `{ok:false, error}`.
+  - **`ankiAdd`** → `POST /anki/add`; replies `{ok, added, skipped}` / `{ok:false, error}`.
 
 ---
 
@@ -193,8 +224,9 @@ Single-file Flask app. Loads heavy models once at import, then serves requests.
 
 ### Configuration (env-overridable)
 `HOST` (default `127.0.0.1`), `PORT` (`5000`), `DEBUG`, `JISHO_TIMEOUT` (5s),
-`MAX_IMAGE_BYTES` (10 MB → `app.config['MAX_CONTENT_LENGTH']`), `MAX_LOOKUPS` (20). `JISHO_API` is the
-Jisho words endpoint. Logging is configured to INFO (or DEBUG when `ALPHAOCR_DEBUG`).
+`MAX_IMAGE_BYTES` (10 MB → `app.config['MAX_CONTENT_LENGTH']`), `MAX_LOOKUPS` (20). Anki:
+`ANKICONNECT_URL` (`http://127.0.0.1:8765`), `ANKI_TIMEOUT` (5s), `ANKI_NOTE_TYPE` (`AlphaOCR`).
+`JISHO_API` is the Jisho words endpoint. Logging is configured to INFO (or DEBUG when `ALPHAOCR_DEBUG`).
 
 ### Startup
 - **MangaOcr** is instantiated once into `mocr`; failure logs and `sys.exit(1)`.
@@ -211,14 +243,32 @@ Jisho words endpoint. Logging is configured to INFO (or DEBUG when `ALPHAOCR_DEB
   opens a `PIL.Image`. Returns `None` on any failure.
 - **`lookup_jisho(keyword)`** — `GET` Jisho with `timeout=JISHO_TIMEOUT`; from the first match returns
   `{word, furigana(reading), translation(joined English definitions)}`, or `None` if no match /
-  network error / unexpected shape.
+  network error / unexpected shape. Wrapped in `functools.lru_cache(maxsize=512)` so repeated words
+  (within and across snips) skip the network.
 - **`tokenize_words(text)`** — the word splitter (see §8). Returns an ordered, de-duplicated list of
   lookup forms, or `[text]` when no tokenizer is present.
+- **`anki_request(action, **params)`** — POSTs the AnkiConnect envelope
+  (`{action, version:6, params}`) to `ANKICONNECT_URL` and returns its `result`; raises `AnkiError`
+  on a network failure (Anki not running) or an AnkiConnect-reported error.
+- **`ensure_note_type()`** — runs once per process (cached via `_note_type_ready`): if
+  `ANKI_NOTE_TYPE` isn't in `modelNames`, creates a Front/Back note type via `createModel`. Anki's
+  stock note types are localized (a non-English install has no model named "Basic"), so AlphaOCR
+  ships its own; overriding `ALPHAOCR_ANKI_NOTE_TYPE` to an existing model skips creation.
+- **`_build_anki_note(deck, word, reading, meaning)`** — maps a word to an AnkiConnect note:
+  `modelName=ANKI_NOTE_TYPE`, `fields={Front: word, Back: "（reading）<br>meaning"}` (reading omitted
+  when empty or equal to the word), `tags=["alphaocr"]`, `options.duplicateScope="deck"`.
 
 ### Routes
 - **`GET /health`** → `{status:"ok", model_loaded: bool}`. Used by the popup.
 - **`POST /shutdown`** → spawns a daemon thread that sleeps 0.3s then `os._exit(0)` (so the response
   flushes first), and returns `{status:"shutting down"}`. Backs the popup's Stop button.
+- **`GET /anki/decks`** → `{decks: sorted(deckNames)}`, or `{error}` (502) if Anki is unreachable.
+- **`POST /anki/create-deck`** → validates `{deck}` (400 if empty), calls `createDeck`, returns
+  `{deck}` (or `{error}` 502). Idempotent — AnkiConnect no-ops if the deck exists.
+- **`POST /anki/add`** → validates `{deck, notes}` (400 if missing/empty), calls
+  `ensure_note_type()`, builds notes via `_build_anki_note`, calls `addNotes`, and returns
+  `{added, skipped, ids}` (AnkiConnect returns `null` ids for duplicates → counted as `skipped`),
+  or `{error}` (502).
 - **`POST /ocr-and-translate`** — the main route:
   1. `get_json(silent=True)`; require `image_data` (else 400).
   2. `decode_image_from_data_url`; (else 400).
@@ -296,8 +346,11 @@ the manifest path. Chrome reads that key to find the host.
 | Message | From → To | Payload | Reply |
 |---|---|---|---|
 | `snip` | content → background | — | `{screenshot}` or `{error}` |
-| `ocrImage` | content → background | `{src}` (cropped PNG data URL) | `{ok, text}` / `{ok:false, error}` |
-| `setTranslation` | background → content | `{text}` | `{ok:true}` |
+| `ocrImage` | content → background | `{src}` (cropped PNG data URL) | `{ok, text, results}` / `{ok:false, error}` |
+| `setTranslation` | background → content | `{text, results}` (`results` = the backend array) | `{ok:true}` |
+| `getDecks` | content → background | — | `{ok, decks}` / `{ok:false, error}` |
+| `createDeck` | content → background | `{deck}` | `{ok, deck}` / `{ok:false, error}` |
+| `ankiAdd` | content → background | `{deck, notes:[{word,reading,meaning}]}` | `{ok, added, skipped}` / `{ok:false, error}` |
 
 ### Backend HTTP API
 | Method/Path | Request | Response |
@@ -305,6 +358,16 @@ the manifest path. Chrome reads that key to find the host.
 | `GET /health` | — | `{status, model_loaded}` |
 | `POST /shutdown` | — | `{status:"shutting down"}` (process exits ~0.3s later) |
 | `POST /ocr-and-translate` | `{image_data: <data URL>}` | `[{text,furigana,translation}...]` or `[{error}]` |
+| `GET /anki/decks` | — | `{decks:[...]}` or `{error}` (502 if Anki unreachable) |
+| `POST /anki/create-deck` | `{deck}` | `{deck}` or `{error}` |
+| `POST /anki/add` | `{deck, notes:[{word,reading,meaning}]}` | `{added, skipped, ids}` or `{error}` |
+
+The three `/anki/*` routes proxy to the **AnkiConnect** add-on (`localhost:8765`, configurable via
+`ALPHAOCR_ANKICONNECT_URL`) via the `anki_request(action, **params)` helper, which raises `AnkiError`
+(→ a clean `{error}`) when Anki isn't running. Notes are created as `ALPHAOCR_ANKI_NOTE_TYPE`
+(default `AlphaOCR`, auto-created via `ensure_note_type` if missing): Front = word,
+Back = `（reading）<br>meaning`, tagged `alphaocr`, with `duplicateScope:"deck"` so re-adding a word
+already in that deck is skipped.
 
 ### Native messaging
 | Action | Request | Reply |
@@ -323,6 +386,9 @@ the manifest path. Chrome reads that key to find the host.
   regardless of how the backend was started); the same threat actor could already spam the OCR
   endpoint, and it's localhost-only.
 - The native host only accepts connections from the single extension ID listed in `allowed_origins`.
+- The `/anki/*` routes make **outbound** calls to the AnkiConnect add-on (`ANKICONNECT_URL`,
+  `localhost:8765`), only while handling those requests and bounded by `ANKI_TIMEOUT`. AnkiConnect is
+  a separate trusted local service the user installs; the backend never exposes it to the network.
 
 ---
 
@@ -331,8 +397,9 @@ the manifest path. Chrome reads that key to find the host.
 | Want to… | Edit |
 |---|---|
 | Change the trigger key | `keydown` handler in `content_script.js` (`e.key === 'Shift'`) |
-| Restyle the result popup | `showDialog` in `content_script.js` |
 | Change which word types are looked up | `_HEAD_POS` / `tokenize_words` in `app.py` |
 | Show more than the first Jisho sense | `lookup_jisho` in `app.py` |
-| Change the backend port | `ALPHAOCR_PORT` env var **and** the URLs in `background.js`/`popup.js` |
+| Change the backend port | `ALPHAOCR_PORT` env var **and** `BACKEND_BASE` in `background.js` + URLs in `popup.js` |
 | Adjust result formatting | `formatOcrResults` in `background.js` |
+| Change the Anki note type / fields | `ALPHAOCR_ANKI_NOTE_TYPE` env var / `_build_anki_note` in `app.py` |
+| Restyle the result popup / word rows | `DIALOG_STYLES` + `renderResults` in `content_script.js` |

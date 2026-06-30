@@ -11,6 +11,7 @@ import time
 import base64
 import logging
 import threading
+from functools import lru_cache
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -24,6 +25,11 @@ PORT = int(os.environ.get("ALPHAOCR_PORT", "5000"))
 DEBUG = os.environ.get("ALPHAOCR_DEBUG", "").lower() in ("1", "true", "yes")
 JISHO_TIMEOUT = float(os.environ.get("ALPHAOCR_JISHO_TIMEOUT", "5"))
 MAX_IMAGE_BYTES = int(os.environ.get("ALPHAOCR_MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))  # 10 MB
+
+# Anki integration (via the AnkiConnect add-on, which Anki must be running for).
+ANKICONNECT_URL = os.environ.get("ALPHAOCR_ANKICONNECT_URL", "http://127.0.0.1:8765")
+ANKI_TIMEOUT = float(os.environ.get("ALPHAOCR_ANKI_TIMEOUT", "5"))
+ANKI_NOTE_TYPE = os.environ.get("ALPHAOCR_ANKI_NOTE_TYPE", "AlphaOCR")  # Front/Back note
 
 JISHO_API = "https://jisho.org/api/v1/search/words"
 
@@ -81,11 +87,13 @@ def decode_image_from_data_url(data_url):
         return None
 
 
+@lru_cache(maxsize=512)
 def lookup_jisho(keyword):
     """Look a word/phrase up on Jisho.
 
     Returns {"furigana", "translation", "word"} on a hit, or None if there is no
-    match or the request fails.
+    match or the request fails. Cached per word so repeated lookups across snips
+    don't re-hit the network (a long line often reuses common words).
     """
     try:
         resp = requests.get(JISHO_API, params={"keyword": keyword}, timeout=JISHO_TIMEOUT)
@@ -111,6 +119,69 @@ def lookup_jisho(keyword):
     except (KeyError, IndexError, ValueError) as e:
         log.error("Unexpected Jisho response shape: %s", e)
         return None
+
+
+class AnkiError(Exception):
+    """AnkiConnect was unreachable or returned an error (e.g. Anki not running)."""
+
+
+def anki_request(action, **params):
+    """Call the AnkiConnect add-on and return its `result`.
+
+    AnkiConnect speaks a single JSON envelope: {"action", "version", "params"}
+    in, {"result", "error"} out. Raises AnkiError if Anki/AnkiConnect isn't
+    reachable or reports an error, so callers can surface one clean message.
+    """
+    try:
+        resp = requests.post(
+            ANKICONNECT_URL,
+            json={"action": action, "version": 6, "params": params},
+            timeout=ANKI_TIMEOUT,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except requests.RequestException as e:
+        log.error("AnkiConnect request failed: %s", e)
+        raise AnkiError("Couldn't reach Anki. Make sure Anki is running with the "
+                        "AnkiConnect add-on installed.") from e
+    except ValueError as e:
+        raise AnkiError("Unexpected response from AnkiConnect.") from e
+
+    if payload.get("error"):
+        raise AnkiError(str(payload["error"]))
+    return payload.get("result")
+
+
+_note_type_ready = False
+
+
+def ensure_note_type():
+    """Make sure ANKI_NOTE_TYPE exists, creating a Front/Back note type if not.
+
+    Anki's stock note types are named differently across locales (a non-English
+    install has no model literally called "Basic"), so we ship our own. If the
+    user points ALPHAOCR_ANKI_NOTE_TYPE at one of their existing models it's
+    already in modelNames and we leave it untouched. Runs once per process.
+    """
+    global _note_type_ready
+    if _note_type_ready:
+        return
+    if ANKI_NOTE_TYPE not in (anki_request("modelNames") or []):
+        anki_request(
+            "createModel",
+            modelName=ANKI_NOTE_TYPE,
+            inOrderFields=["Front", "Back"],
+            isCloze=False,
+            css=(".card { font-family: sans-serif; font-size: 22px; "
+                 "text-align: center; color: black; background-color: white; }"),
+            cardTemplates=[{
+                "Name": "Card 1",
+                "Front": "{{Front}}",
+                "Back": "{{FrontSide}}<hr id=answer>{{Back}}",
+            }],
+        )
+        log.info("Created Anki note type %r.", ANKI_NOTE_TYPE)
+    _note_type_ready = True
 
 
 def tokenize_words(text):
@@ -174,6 +245,83 @@ def shutdown():
     # Delay slightly so this response can flush before the process exits.
     threading.Thread(target=lambda: (time.sleep(0.3), os._exit(0)), daemon=True).start()
     return jsonify({"status": "shutting down"})
+
+
+@app.route("/anki/decks", methods=["GET"])
+def anki_decks():
+    """List the user's Anki decks (for the dialog's deck picker)."""
+    try:
+        decks = anki_request("deckNames")
+    except AnkiError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"decks": sorted(decks or [])})
+
+
+@app.route("/anki/create-deck", methods=["POST"])
+def anki_create_deck():
+    """Create a new Anki deck (no-op if it already exists)."""
+    data = request.get_json(silent=True) or {}
+    deck = (data.get("deck") or "").strip()
+    if not deck:
+        return jsonify({"error": "Missing 'deck' name"}), 400
+    try:
+        anki_request("createDeck", deck=deck)
+    except AnkiError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"deck": deck})
+
+
+def _build_anki_note(deck, word, reading, meaning):
+    """Map an OCR word into an AnkiConnect 'Basic' note (Front/Back)."""
+    reading_html = f"（{reading}）<br>" if reading and reading != word else ""
+    back = f"{reading_html}{meaning}".strip()
+    return {
+        "deckName": deck,
+        "modelName": ANKI_NOTE_TYPE,
+        "fields": {"Front": word, "Back": back},
+        "tags": ["alphaocr"],
+        "options": {"allowDuplicate": False, "duplicateScope": "deck"},
+    }
+
+
+@app.route("/anki/add", methods=["POST"])
+def anki_add():
+    """Add the selected words to Anki as Basic notes.
+
+    Body: {"deck": str, "notes": [{"word","reading","meaning"}, ...]}.
+    AnkiConnect's addNotes returns a note id per entry, or null where the note
+    was a duplicate / couldn't be added — we count those as 'skipped'.
+    """
+    data = request.get_json(silent=True) or {}
+    deck = (data.get("deck") or "").strip()
+    notes = data.get("notes")
+    if not deck:
+        return jsonify({"error": "Missing 'deck' name"}), 400
+    if not isinstance(notes, list) or not notes:
+        return jsonify({"error": "Missing 'notes' to add"}), 400
+
+    anki_notes = [
+        _build_anki_note(
+            deck,
+            (n.get("word") or "").strip(),
+            (n.get("reading") or "").strip(),
+            (n.get("meaning") or "").strip(),
+        )
+        for n in notes
+        if (n.get("word") or "").strip()
+    ]
+    if not anki_notes:
+        return jsonify({"error": "No valid words to add"}), 400
+
+    try:
+        ensure_note_type()
+        ids = anki_request("addNotes", notes=anki_notes)
+    except AnkiError as e:
+        return jsonify({"error": str(e)}), 502
+
+    ids = ids or []
+    added = sum(1 for i in ids if i)
+    return jsonify({"added": added, "skipped": len(anki_notes) - added, "ids": ids})
 
 
 @app.route("/ocr-and-translate", methods=["POST"])

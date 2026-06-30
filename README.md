@@ -37,6 +37,7 @@ where the text isn't selectable.
                                       v
 +------------------------- Python backend (app.py) -------------------------+
 |  /ocr-and-translate    MangaOcr (image->text) -> fugashi -> Jisho         |
+|  /anki/decks /anki/add proxy to AnkiConnect (localhost:8765)              |
 |  /health  /shutdown    status probe / stop the server                     |
 +---------------------------------------------------------------------------+
 ```
@@ -140,8 +141,27 @@ popup's **Start** button, register the native-messaging launcher **once**:
 3. **Snip** — press **Shift**, then **drag a box** over the Japanese text and release.
 4. **Read** — a popup appears showing the full recognized line and a per-word breakdown
    (`word（reading）— meaning`). **Drag it** by the "Translation" header; press **Escape** to close.
-5. **Stop the backend** when done — click **Stop** (the button turns red while running) to free the
+5. **Add to Anki** (optional) — see below.
+6. **Stop the backend** when done — click **Stop** (the button turns red while running) to free the
    memory the model uses.
+
+### Add words to Anki
+
+The result popup can send the recognized words straight into an Anki deck.
+
+**One-time setup:** install the **AnkiConnect** add-on (Anki → Tools → Add-ons → Get Add-ons →
+code `2055492159`) and restart Anki. The backend talks to AnkiConnect on `localhost:8765`, so no
+extra browser configuration is needed.
+
+**Each time:** keep **Anki open**, then in the result popup:
+1. Each recognized word has a **checkbox** (all ticked by default) — untick the ones you don't want.
+2. **Pick a deck** from the dropdown, or click **+ New deck** to create one on the spot.
+3. Click **Add to Anki**. Cards use an **AlphaOCR** note type (Front = word,
+   Back = reading + meaning), created automatically the first time so it works on any Anki
+   install. Cards are tagged `alphaocr`; words already in the deck are skipped.
+
+If Anki isn't running (or AnkiConnect isn't installed), the popup says so and the Add controls are
+disabled — OCR still works as normal.
 
 ## Configuration
 
@@ -155,6 +175,9 @@ The backend reads these environment variables (all optional):
 | `ALPHAOCR_JISHO_TIMEOUT` | `5` | Seconds before a Jisho request times out. |
 | `ALPHAOCR_MAX_IMAGE_BYTES` | `10485760` | Max accepted request body (10 MB). |
 | `ALPHAOCR_MAX_LOOKUPS` | `20` | Max distinct words looked up per snip. |
+| `ALPHAOCR_ANKICONNECT_URL` | `http://127.0.0.1:8765` | AnkiConnect endpoint used for the "Add to Anki" feature. |
+| `ALPHAOCR_ANKI_TIMEOUT` | `5` | Seconds before an AnkiConnect request times out. |
+| `ALPHAOCR_ANKI_NOTE_TYPE` | `AlphaOCR` | Anki note type for added cards. Auto-created (Front/Back) if missing; point it at one of your own models to reuse it (must have `Front`/`Back` fields). |
 
 Set one for a single run in PowerShell, e.g.:
 
@@ -172,6 +195,14 @@ $env:ALPHAOCR_DEBUG = "1"; python app.py
   registered a different/old extension ID. Re-run it with your current ID (step 3).
 - **Capture fails on a page** — screenshots don't work on restricted pages (`chrome://*`, the Chrome
   Web Store, the built-in PDF viewer).
+- **Snip sticks on "⏳ Capturing…" after reloading/updating the extension** — the open tab still has
+  the *old* content script, whose connection to the extension was invalidated by the reload. **Refresh
+  the tab** (F5) and snip again. (Reloading the extension always requires refreshing any pages you want
+  to snip on.)
+- **"Add to Anki" is disabled / says Anki isn't running** — open **Anki** and make sure the
+  **AnkiConnect** add-on is installed (Tools → Add-ons → Get Add-ons → code `2055492159`) and you've
+  restarted Anki. The backend reaches it on `localhost:8765`.
+- **Deck dropdown is empty** — create one with **+ New deck**, or add a deck inside Anki, then re-snip.
 - **Stop a manually-started backend** — close its terminal, or run `taskkill /IM python.exe /F`
   (kills all Python processes).
 - **Crop looks misaligned** — set `ALPHAOCR_DEBUG=1` and inspect `debug_cropped_image.png`; this is
@@ -181,6 +212,10 @@ $env:ALPHAOCR_DEBUG = "1"; python app.py
 
 - Word splitting is **short-unit**: it captures single words and noun+suffix compounds (e.g. 加害者)
   well, but won't merge longer multi-word phrases. That's generally ideal for dictionary lookups.
-- Each word triggers a separate Jisho request, so a long line takes a few seconds.
+- Each new word triggers a separate Jisho request, so a long line takes a few seconds the first time.
+  Lookups are cached per word, so words you've seen before resolve instantly.
 - Per-word lookup needs `fugashi` + `unidic-lite` (installed via `requirements.txt`). Without them the
   backend still runs but looks the whole line up as one entry.
+- **Anki export** needs Anki running with the **AnkiConnect** add-on; the cards it creates use the
+  auto-generated `AlphaOCR` note type (Front/Back). Without Anki open, OCR still works — only the
+  Add-to-Anki controls are disabled.

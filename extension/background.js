@@ -2,7 +2,35 @@
 
 console.log("AlphaOCR background service worker running");
 
-const OCR_ENDPOINT = "http://127.0.0.1:5000/ocr-and-translate";
+// Single source for the backend host:port (see TECHNICAL.md §12).
+const BACKEND_BASE = "http://127.0.0.1:5000";
+const OCR_ENDPOINT = `${BACKEND_BASE}/ocr-and-translate`;
+const ANKI_DECKS_URL = `${BACKEND_BASE}/anki/decks`;
+const ANKI_CREATE_DECK_URL = `${BACKEND_BASE}/anki/create-deck`;
+const ANKI_ADD_URL = `${BACKEND_BASE}/anki/add`;
+
+const OCR_TIMEOUT_MS = 30000;
+const ANKI_TIMEOUT_MS = 10000;
+
+// fetch() with an abort-based timeout so a hung backend can't wedge the dialog.
+async function fetchJson(url, options = {}, timeoutMs = ANKI_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      const msg = (data && data.error) || `Server error: ${res.status}`;
+      throw new Error(msg);
+    }
+    return data;
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error("Request timed out");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // --- Enabled toggle: badge + default state -------------------------------
 
@@ -65,33 +93,76 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "ocrImage" && message.src) {
     console.log("📩 Received OCR request from content script");
 
-    fetch(OCR_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image_data: message.src }),
-    })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`Server error: ${res.status}`);
-        const data = await res.json();
+    fetchJson(
+      OCR_ENDPOINT,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image_data: message.src }),
+      },
+      OCR_TIMEOUT_MS,
+    )
+      .then((data) => {
         console.log("✅ OCR result:", data);
-
+        // Pass both the formatted string (fallback) and the structured array so
+        // the dialog can render a checkbox per word for Anki export.
         const text = formatOcrResults(data);
         if (sender.tab && sender.tab.id >= 0) {
-          chrome.tabs.sendMessage(sender.tab.id, { action: "setTranslation", text });
+          chrome.tabs.sendMessage(sender.tab.id, { action: "setTranslation", text, results: data });
         }
-        sendResponse({ ok: true, text });
+        sendResponse({ ok: true, text, results: data });
       })
       .catch((err) => {
         console.error("❌ OCR fetch failed:", err);
         if (sender.tab && sender.tab.id >= 0) {
           chrome.tabs.sendMessage(sender.tab.id, {
             action: "setTranslation",
-            text: "❌ Backend not responding",
+            text: `❌ ${err.message || "Backend not responding"}`,
           });
         }
         sendResponse({ ok: false, error: String(err) });
       });
 
     return true; // async sendResponse
+  }
+
+  // 3) List Anki decks (for the dialog's deck picker).
+  if (message.action === "getDecks") {
+    fetchJson(ANKI_DECKS_URL, {}, ANKI_TIMEOUT_MS)
+      .then((data) => sendResponse({ ok: true, decks: data.decks || [] }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  // 4) Create a new Anki deck.
+  if (message.action === "createDeck" && message.deck) {
+    fetchJson(
+      ANKI_CREATE_DECK_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deck: message.deck }),
+      },
+      ANKI_TIMEOUT_MS,
+    )
+      .then((data) => sendResponse({ ok: true, deck: data.deck }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
+  }
+
+  // 5) Add the selected words to an Anki deck.
+  if (message.action === "ankiAdd" && message.deck && Array.isArray(message.notes)) {
+    fetchJson(
+      ANKI_ADD_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deck: message.deck, notes: message.notes }),
+      },
+      ANKI_TIMEOUT_MS,
+    )
+      .then((data) => sendResponse({ ok: true, added: data.added, skipped: data.skipped }))
+      .catch((err) => sendResponse({ ok: false, error: err.message || String(err) }));
+    return true;
   }
 });
